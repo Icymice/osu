@@ -55,7 +55,7 @@ namespace osu.Game.Screens.Select.Carousel
         private BeatmapSetOverlay beatmapOverlay { get; set; }
 
         [Resolved]
-        private BeatmapDifficultyManager difficultyManager { get; set; }
+        private BeatmapDifficultyCache difficultyCache { get; set; }
 
         [Resolved(CanBeNull = true)]
         private CollectionManager collectionManager { get; set; }
@@ -63,7 +63,7 @@ namespace osu.Game.Screens.Select.Carousel
         [Resolved(CanBeNull = true)]
         private ManageCollectionsDialog manageCollectionsDialog { get; set; }
 
-        private IBindable<StarDifficulty> starDifficultyBindable;
+        private IBindable<StarDifficulty?> starDifficultyBindable;
         private CancellationTokenSource starDifficultyCancellationSource;
 
         public DrawableCarouselBeatmap(CarouselBeatmap panel)
@@ -216,8 +216,11 @@ namespace osu.Game.Screens.Select.Carousel
             if (Item.State.Value != CarouselItemState.Collapsed)
             {
                 // We've potentially cancelled the computation above so a new bindable is required.
-                starDifficultyBindable = difficultyManager.GetBindableDifficulty(beatmap, (starDifficultyCancellationSource = new CancellationTokenSource()).Token);
-                starDifficultyBindable.BindValueChanged(d => starCounter.Current = (float)d.NewValue.Stars, true);
+                starDifficultyBindable = difficultyCache.GetBindableDifficulty(beatmap, (starDifficultyCancellationSource = new CancellationTokenSource()).Token);
+                starDifficultyBindable.BindValueChanged(d =>
+                {
+                    starCounter.Current = (float)(d.NewValue?.Stars ?? 0);
+                }, true);
             }
 
             base.ApplyState();

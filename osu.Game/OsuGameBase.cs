@@ -30,12 +30,17 @@ using osu.Game.Database;
 using osu.Game.Input;
 using osu.Game.Input.Bindings;
 using osu.Game.IO;
+using osu.Game.Online;
+using osu.Game.Online.Chat;
+using osu.Game.Online.Multiplayer;
+using osu.Game.Online.Spectator;
 using osu.Game.Overlays;
 using osu.Game.Resources;
 using osu.Game.Rulesets;
 using osu.Game.Rulesets.Mods;
 using osu.Game.Scoring;
 using osu.Game.Skinning;
+using osu.Game.Utils;
 using osuTK.Input;
 using RuntimeInfo = osu.Framework.RuntimeInfo;
 
@@ -52,13 +57,17 @@ namespace osu.Game
 
         public const int SAMPLE_CONCURRENCY = 6;
 
+        public bool UseDevelopmentServer { get; }
+
         protected OsuConfigManager LocalConfig;
 
         protected BeatmapManager BeatmapManager;
 
         protected ScoreManager ScoreManager;
 
-        protected BeatmapDifficultyManager DifficultyManager;
+        protected BeatmapDifficultyCache DifficultyCache;
+
+        protected UserLookupCache UserCache;
 
         protected SkinManager SkinManager;
 
@@ -74,6 +83,9 @@ namespace osu.Game
 
         protected IAPIProvider API;
 
+        private SpectatorStreamingClient spectatorStreaming;
+        private StatefulMultiplayerClient multiplayerClient;
+
         protected MenuCursorContainer MenuCursorContainer;
 
         protected MusicController MusicController;
@@ -88,7 +100,14 @@ namespace osu.Game
         [Cached(typeof(IBindable<RulesetInfo>))]
         protected readonly Bindable<RulesetInfo> Ruleset = new Bindable<RulesetInfo>();
 
-        // todo: move this to SongSelect once Screen has the ability to unsuspend.
+        /// <summary>
+        /// The current mod selection for the local user.
+        /// </summary>
+        /// <remarks>
+        /// If a mod select overlay is present, mod instances set to this value are not guaranteed to remain as the provided instance and will be overwritten by a copy.
+        /// In such a case, changes to settings of a mod will *not* propagate after a mod is added to this collection.
+        /// As such, all settings should be finalised before adding a mod to this collection.
+        /// </remarks>
         [Cached]
         [Cached(typeof(IBindable<IReadOnlyList<Mod>>))]
         protected readonly Bindable<IReadOnlyList<Mod>> SelectedMods = new Bindable<IReadOnlyList<Mod>>(Array.Empty<Mod>());
@@ -125,6 +144,7 @@ namespace osu.Game
 
         public OsuGameBase()
         {
+            UseDevelopmentServer = DebugUtils.IsDebugBuild;
             Name = @"osu!lazer";
         }
 
@@ -136,6 +156,15 @@ namespace osu.Game
         private DatabaseContextFactory contextFactory;
 
         protected override UserInputManager CreateUserInputManager() => new OsuUserInputManager();
+
+        protected virtual BatteryInfo CreateBatteryInfo() => null;
+
+        /// <summary>
+        /// The maximum volume at which audio tracks should playback. This can be set lower than 1 to create some head-room for sound effects.
+        /// </summary>
+        internal const double GLOBAL_TRACK_VOLUME_ADJUST = 0.5;
+
+        private readonly BindableNumber<double> globalTrackVolumeAdjust = new BindableNumber<double>(GLOBAL_TRACK_VOLUME_ADJUST);
 
         [BackgroundDependencyLoader]
         private void load()
@@ -163,7 +192,7 @@ namespace osu.Game
             dependencies.Cache(largeStore);
 
             dependencies.CacheAs(this);
-            dependencies.Cache(LocalConfig);
+            dependencies.CacheAs(LocalConfig);
 
             AddFont(Resources, @"Fonts/osuFont");
 
@@ -189,9 +218,28 @@ namespace osu.Game
             dependencies.Cache(SkinManager = new SkinManager(Storage, contextFactory, Host, Audio, new NamespacedResourceStore<byte[]>(Resources, "Skins/Legacy")));
             dependencies.CacheAs<ISkinSource>(SkinManager);
 
-            API ??= new APIAccess(LocalConfig);
+            // needs to be done here rather than inside SkinManager to ensure thread safety of CurrentSkinInfo.
+            SkinManager.ItemRemoved.BindValueChanged(weakRemovedInfo =>
+            {
+                if (weakRemovedInfo.NewValue.TryGetTarget(out var removedInfo))
+                {
+                    Schedule(() =>
+                    {
+                        // check the removed skin is not the current user choice. if it is, switch back to default.
+                        if (removedInfo.ID == SkinManager.CurrentSkinInfo.Value.ID)
+                            SkinManager.CurrentSkinInfo.Value = SkinInfo.Default;
+                    });
+                }
+            });
 
-            dependencies.CacheAs(API);
+            EndpointConfiguration endpoints = UseDevelopmentServer ? (EndpointConfiguration)new DevelopmentEndpointConfiguration() : new ProductionEndpointConfiguration();
+
+            MessageFormatter.WebsiteRootUrl = endpoints.WebsiteRootUrl;
+
+            dependencies.CacheAs(API ??= new APIAccess(LocalConfig, endpoints, VersionHash));
+
+            dependencies.CacheAs(spectatorStreaming = new SpectatorStreamingClient(endpoints));
+            dependencies.CacheAs(multiplayerClient = new MultiplayerClient(endpoints));
 
             var defaultBeatmap = new DummyWorkingBeatmap(Audio, Textures);
 
@@ -199,7 +247,7 @@ namespace osu.Game
             dependencies.Cache(FileStore = new FileStore(contextFactory, Storage));
 
             // ordering is important here to ensure foreign keys rules are not broken in ModelStore.Cleanup()
-            dependencies.Cache(ScoreManager = new ScoreManager(RulesetStore, () => BeatmapManager, Storage, API, contextFactory, Host, () => DifficultyManager, LocalConfig));
+            dependencies.Cache(ScoreManager = new ScoreManager(RulesetStore, () => BeatmapManager, Storage, API, contextFactory, Host, () => DifficultyCache, LocalConfig));
             dependencies.Cache(BeatmapManager = new BeatmapManager(Storage, contextFactory, RulesetStore, API, Audio, Host, defaultBeatmap, true));
 
             // this should likely be moved to ArchiveModelManager when another case appers where it is necessary
@@ -223,12 +271,24 @@ namespace osu.Game
                     ScoreManager.Undelete(getBeatmapScores(item), true);
             });
 
-            dependencies.Cache(DifficultyManager = new BeatmapDifficultyManager());
-            AddInternal(DifficultyManager);
+            dependencies.Cache(DifficultyCache = new BeatmapDifficultyCache());
+            AddInternal(DifficultyCache);
+
+            dependencies.Cache(UserCache = new UserLookupCache());
+            AddInternal(UserCache);
+
+            var scorePerformanceManager = new ScorePerformanceCache();
+            dependencies.Cache(scorePerformanceManager);
+            AddInternal(scorePerformanceManager);
 
             dependencies.Cache(KeyBindingStore = new KeyBindingStore(contextFactory, RulesetStore));
             dependencies.Cache(SettingsStore = new SettingsStore(contextFactory));
             dependencies.Cache(RulesetConfigCache = new RulesetConfigCache(SettingsStore));
+
+            var powerStatus = CreateBatteryInfo();
+            if (powerStatus != null)
+                dependencies.CacheAs(powerStatus);
+
             dependencies.Cache(new SessionStatics());
             dependencies.Cache(new OsuColour());
 
@@ -236,9 +296,10 @@ namespace osu.Game
             RegisterImportHandler(ScoreManager);
             RegisterImportHandler(SkinManager);
 
-            // tracks play so loud our samples can't keep up.
-            // this adds a global reduction of track volume for the time being.
-            Audio.Tracks.AddAdjustment(AdjustableProperty.Volume, new BindableDouble(0.8));
+            // drop track volume game-wide to leave some head-room for UI effects / samples.
+            // this means that for the time being, gameplay sample playback is louder relative to the audio track, compared to stable.
+            // we may want to revisit this if users notice or complain about the difference (consider this a bit of a trial).
+            Audio.Tracks.AddAdjustment(AdjustableProperty.Volume, globalTrackVolumeAdjust);
 
             Beatmap = new NonNullableBindable<WorkingBeatmap>(defaultBeatmap);
 
@@ -247,21 +308,26 @@ namespace osu.Game
 
             FileStore.Cleanup();
 
+            // add api components to hierarchy.
             if (API is APIAccess apiAccess)
                 AddInternal(apiAccess);
-            AddInternal(RulesetConfigCache);
+            AddInternal(spectatorStreaming);
+            AddInternal(multiplayerClient);
 
-            MenuCursorContainer = new MenuCursorContainer { RelativeSizeAxes = Axes.Both };
+            AddInternal(RulesetConfigCache);
 
             GlobalActionContainer globalBindings;
 
-            MenuCursorContainer.Child = globalBindings = new GlobalActionContainer(this)
+            var mainContent = new Drawable[]
             {
-                RelativeSizeAxes = Axes.Both,
-                Child = content = new OsuTooltipContainer(MenuCursorContainer.Cursor) { RelativeSizeAxes = Axes.Both }
+                MenuCursorContainer = new MenuCursorContainer { RelativeSizeAxes = Axes.Both },
+                // to avoid positional input being blocked by children, ensure the GlobalActionContainer is above everything.
+                globalBindings = new GlobalActionContainer(this)
             };
 
-            base.Content.Add(CreateScalingContainer().WithChild(MenuCursorContainer));
+            MenuCursorContainer.Child = content = new OsuTooltipContainer(MenuCursorContainer.Cursor) { RelativeSizeAxes = Axes.Both };
+
+            base.Content.Add(CreateScalingContainer().WithChildren(mainContent));
 
             KeyBindingStore.Register(globalBindings);
             dependencies.Cache(globalBindings);
@@ -288,6 +354,7 @@ namespace osu.Game
 
             if (!SelectedMods.Disabled)
                 SelectedMods.Value = Array.Empty<Mod>();
+
             AvailableMods.Value = dict;
         }
 
@@ -336,7 +403,21 @@ namespace osu.Game
             // may be non-null for certain tests
             Storage ??= host.Storage;
 
-            LocalConfig ??= new OsuConfigManager(Storage);
+            LocalConfig ??= UseDevelopmentServer
+                ? new DevelopmentOsuConfigManager(Storage)
+                : new OsuConfigManager(Storage);
+        }
+
+        /// <summary>
+        /// Use to programatically exit the game as if the user was triggering via alt-f4.
+        /// Will keep persisting until an exit occurs (exit may be blocked multiple times).
+        /// </summary>
+        public void GracefullyExit()
+        {
+            if (!OnExiting())
+                Exit();
+            else
+                Scheduler.AddDelayed(GracefullyExit, 2000);
         }
 
         protected override Storage CreateStorage(GameHost host, Storage defaultStorage) => new OsuStorage(host, defaultStorage);
@@ -357,13 +438,29 @@ namespace osu.Game
 
         public async Task Import(params string[] paths)
         {
-            var extension = Path.GetExtension(paths.First())?.ToLowerInvariant();
+            if (paths.Length == 0)
+                return;
 
-            foreach (var importer in fileImporters)
+            var filesPerExtension = paths.GroupBy(p => Path.GetExtension(p).ToLowerInvariant());
+
+            foreach (var groups in filesPerExtension)
             {
-                if (importer.HandledExtensions.Contains(extension))
-                    await importer.Import(paths);
+                foreach (var importer in fileImporters)
+                {
+                    if (importer.HandledExtensions.Contains(groups.Key))
+                        await importer.Import(groups.ToArray()).ConfigureAwait(false);
+                }
             }
+        }
+
+        public virtual async Task Import(params ImportTask[] tasks)
+        {
+            var tasksPerExtension = tasks.GroupBy(t => Path.GetExtension(t.Path).ToLowerInvariant());
+            await Task.WhenAll(tasksPerExtension.Select(taskGroup =>
+            {
+                var importer = fileImporters.FirstOrDefault(i => i.HandledExtensions.Contains(taskGroup.Key));
+                return importer?.Import(taskGroup.ToArray()) ?? Task.CompletedTask;
+            })).ConfigureAwait(false);
         }
 
         public IEnumerable<string> HandledExtensions => fileImporters.SelectMany(i => i.HandledExtensions);

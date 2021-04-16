@@ -2,6 +2,7 @@
 // See the LICENCE file in the repository root for full licence text.
 
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using Newtonsoft.Json;
@@ -43,9 +44,12 @@ namespace osu.Game.Tournament.Screens.Editors
         private void addAllCountries()
         {
             List<TournamentTeam> countries;
+
             using (Stream stream = game.Resources.GetStream("Resources/countries.json"))
             using (var sr = new StreamReader(stream))
                 countries = JsonConvert.DeserializeObject<List<TournamentTeam>>(sr.ReadToEnd());
+
+            Debug.Assert(countries != null);
 
             foreach (var c in countries)
                 Storage.Add(c);
@@ -277,7 +281,7 @@ namespace osu.Game.Tournament.Screens.Editors
                         userId.Value = user.Id.ToString();
                         userId.BindValueChanged(idString =>
                         {
-                            long.TryParse(idString.NewValue, out var parsed);
+                            int.TryParse(idString.NewValue, out var parsed);
 
                             user.Id = parsed;
 

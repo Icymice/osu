@@ -35,7 +35,6 @@ namespace osu.Game.Rulesets.Taiko.Replays
 
             bool hitButton = true;
 
-            Frames.Add(new TaikoReplayFrame(-100000));
             Frames.Add(new TaikoReplayFrame(Beatmap.HitObjects[0].StartTime - 1000));
 
             for (int i = 0; i < Beatmap.HitObjects.Count; i++)
@@ -102,13 +101,13 @@ namespace osu.Game.Rulesets.Taiko.Replays
 
                         if (hit.Type == HitType.Centre)
                         {
-                            actions = h.IsStrong
+                            actions = hit.IsStrong
                                 ? new[] { TaikoAction.LeftCentre, TaikoAction.RightCentre }
                                 : new[] { hitButton ? TaikoAction.LeftCentre : TaikoAction.RightCentre };
                         }
                         else
                         {
-                            actions = h.IsStrong
+                            actions = hit.IsStrong
                                 ? new[] { TaikoAction.LeftRim, TaikoAction.RightRim }
                                 : new[] { hitButton ? TaikoAction.LeftRim : TaikoAction.RightRim };
                         }

@@ -2,8 +2,8 @@
 // See the LICENCE file in the repository root for full licence text.
 
 using System.Diagnostics;
+using JetBrains.Annotations;
 using osu.Framework.Allocation;
-using osu.Framework.Bindables;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Game.Rulesets.Objects.Drawables;
@@ -14,27 +14,43 @@ namespace osu.Game.Rulesets.Osu.Objects.Drawables
 {
     public class DrawableSliderTail : DrawableOsuHitObject, IRequireTracking, ITrackSnaking
     {
-        private readonly SliderTailCircle tailCircle;
+        public new SliderTailCircle HitObject => (SliderTailCircle)base.HitObject;
+
+        [CanBeNull]
+        public Slider Slider => DrawableSlider?.HitObject;
+
+        protected DrawableSlider DrawableSlider => (DrawableSlider)ParentHitObject;
 
         /// <summary>
         /// The judgement text is provided by the <see cref="DrawableSlider"/>.
         /// </summary>
         public override bool DisplayResult => false;
 
+        /// <summary>
+        /// Whether the hit samples only play on successful hits.
+        /// If <c>false</c>, the hit samples will also play on misses.
+        /// </summary>
+        public bool SamplePlaysOnlyOnHit { get; set; } = true;
+
         public bool Tracking { get; set; }
 
-        private readonly IBindable<float> scaleBindable = new BindableFloat();
+        private SkinnableDrawable circlePiece;
+        private Container scaleContainer;
 
-        private readonly SkinnableDrawable circlePiece;
+        public DrawableSliderTail()
+            : base(null)
+        {
+        }
 
-        private readonly Container scaleContainer;
-
-        public DrawableSliderTail(Slider slider, SliderTailCircle tailCircle)
+        public DrawableSliderTail(SliderTailCircle tailCircle)
             : base(tailCircle)
         {
-            this.tailCircle = tailCircle;
-            Origin = Anchor.Centre;
+        }
 
+        [BackgroundDependencyLoader]
+        private void load()
+        {
+            Origin = Anchor.Centre;
             Size = new Vector2(OsuHitObject.OBJECT_RADIUS * 2);
 
             InternalChildren = new Drawable[]
@@ -51,13 +67,8 @@ namespace osu.Game.Rulesets.Osu.Objects.Drawables
                     }
                 },
             };
-        }
 
-        [BackgroundDependencyLoader]
-        private void load()
-        {
-            scaleBindable.BindValueChanged(scale => scaleContainer.Scale = new Vector2(scale.NewValue), true);
-            scaleBindable.BindTo(HitObject.ScaleBindable);
+            ScaleBindable.BindValueChanged(scale => scaleContainer.Scale = new Vector2(scale.NewValue));
         }
 
         protected override void UpdateInitialTransforms()
@@ -67,9 +78,9 @@ namespace osu.Game.Rulesets.Osu.Objects.Drawables
             circlePiece.FadeInFromZero(HitObject.TimeFadeIn);
         }
 
-        protected override void UpdateStateTransforms(ArmedState state)
+        protected override void UpdateHitStateTransforms(ArmedState state)
         {
-            base.UpdateStateTransforms(state);
+            base.UpdateHitStateTransforms(state);
 
             Debug.Assert(HitObject.HitWindows != null);
 
@@ -77,8 +88,6 @@ namespace osu.Game.Rulesets.Osu.Objects.Drawables
             {
                 case ArmedState.Idle:
                     this.Delay(HitObject.TimePreempt).FadeOut(500);
-
-                    Expire(true);
                     break;
 
                 case ArmedState.Miss:
@@ -99,6 +108,6 @@ namespace osu.Game.Rulesets.Osu.Objects.Drawables
         }
 
         public void UpdateSnakingPosition(Vector2 start, Vector2 end) =>
-            Position = tailCircle.RepeatIndex % 2 == 0 ? end : start;
+            Position = HitObject.RepeatIndex % 2 == 0 ? end : start;
     }
 }

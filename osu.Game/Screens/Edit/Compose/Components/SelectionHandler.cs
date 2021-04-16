@@ -14,7 +14,7 @@ using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.UserInterface;
 using osu.Framework.Input;
 using osu.Framework.Input.Bindings;
-using osu.Framework.Input.States;
+using osu.Framework.Input.Events;
 using osu.Game.Audio;
 using osu.Game.Graphics;
 using osu.Game.Graphics.Sprites;
@@ -24,6 +24,7 @@ using osu.Game.Rulesets.Objects;
 using osu.Game.Rulesets.Objects.Drawables;
 using osu.Game.Rulesets.Objects.Types;
 using osuTK;
+using osuTK.Input;
 
 namespace osu.Game.Screens.Edit.Compose.Components
 {
@@ -98,10 +99,10 @@ namespace osu.Game.Screens.Edit.Compose.Components
                 OperationStarted = OnOperationBegan,
                 OperationEnded = OnOperationEnded,
 
-                OnRotation = angle => HandleRotation(angle),
-                OnScale = (amount, anchor) => HandleScale(amount, anchor),
-                OnFlip = direction => HandleFlip(direction),
-                OnReverse = () => HandleReverse(),
+                OnRotation = HandleRotation,
+                OnScale = HandleScale,
+                OnFlip = HandleFlip,
+                OnReverse = HandleReverse,
             };
 
         /// <summary>
@@ -109,7 +110,7 @@ namespace osu.Game.Screens.Edit.Compose.Components
         /// </summary>
         protected virtual void OnOperationBegan()
         {
-            ChangeHandler.BeginChange();
+            ChangeHandler?.BeginChange();
         }
 
         /// <summary>
@@ -117,7 +118,7 @@ namespace osu.Game.Screens.Edit.Compose.Components
         /// </summary>
         protected virtual void OnOperationEnded()
         {
-            ChangeHandler.EndChange();
+            ChangeHandler?.EndChange();
         }
 
         #region User Input Handling
@@ -200,8 +201,6 @@ namespace osu.Game.Screens.Edit.Compose.Components
             // there are potentially multiple SelectionHandlers active, but we only want to add hitobjects to the selected list once.
             if (!EditorBeatmap.SelectedHitObjects.Contains(blueprint.HitObject))
                 EditorBeatmap.SelectedHitObjects.Add(blueprint.HitObject);
-
-            UpdateVisibility();
         }
 
         /// <summary>
@@ -213,32 +212,73 @@ namespace osu.Game.Screens.Edit.Compose.Components
             selectedBlueprints.Remove(blueprint);
 
             EditorBeatmap.SelectedHitObjects.Remove(blueprint.HitObject);
-
-            UpdateVisibility();
         }
 
         /// <summary>
         /// Handle a blueprint requesting selection.
         /// </summary>
         /// <param name="blueprint">The blueprint.</param>
-        /// <param name="state">The input state at the point of selection.</param>
-        internal void HandleSelectionRequested(SelectionBlueprint blueprint, InputState state)
+        /// <param name="e">The mouse event responsible for selection.</param>
+        /// <returns>Whether a selection was performed.</returns>
+        internal bool MouseDownSelectionRequested(SelectionBlueprint blueprint, MouseButtonEvent e)
         {
-            if (state.Keyboard.ControlPressed)
+            if (e.ShiftPressed && e.Button == MouseButton.Right)
             {
-                if (blueprint.IsSelected)
-                    blueprint.Deselect();
-                else
-                    blueprint.Select();
+                handleQuickDeletion(blueprint);
+                return true;
             }
-            else
-            {
-                if (blueprint.IsSelected)
-                    return;
 
-                DeselectAll?.Invoke();
-                blueprint.Select();
+            // while holding control, we only want to add to selection, not replace an existing selection.
+            if (e.ControlPressed && e.Button == MouseButton.Left && !blueprint.IsSelected)
+            {
+                blueprint.ToggleSelection();
+                return true;
             }
+
+            return ensureSelected(blueprint);
+        }
+
+        /// <summary>
+        /// Handle a blueprint requesting selection.
+        /// </summary>
+        /// <param name="blueprint">The blueprint.</param>
+        /// <param name="e">The mouse event responsible for deselection.</param>
+        /// <returns>Whether a deselection was performed.</returns>
+        internal bool MouseUpSelectionRequested(SelectionBlueprint blueprint, MouseButtonEvent e)
+        {
+            if (blueprint.IsSelected)
+            {
+                blueprint.ToggleSelection();
+                return true;
+            }
+
+            return false;
+        }
+
+        private void handleQuickDeletion(SelectionBlueprint blueprint)
+        {
+            if (blueprint.HandleQuickDeletion())
+                return;
+
+            if (!blueprint.IsSelected)
+                EditorBeatmap.Remove(blueprint.HitObject);
+            else
+                deleteSelected();
+        }
+
+        /// <summary>
+        /// Ensure the blueprint is in a selected state.
+        /// </summary>
+        /// <param name="blueprint">The blueprint to select.</param>
+        /// <returns>Whether selection state was changed.</returns>
+        private bool ensureSelected(SelectionBlueprint blueprint)
+        {
+            if (blueprint.IsSelected)
+                return false;
+
+            DeselectAll?.Invoke();
+            blueprint.Select();
+            return true;
         }
 
         private void deleteSelected()
@@ -253,23 +293,18 @@ namespace osu.Game.Screens.Edit.Compose.Components
         /// <summary>
         /// Updates whether this <see cref="SelectionHandler"/> is visible.
         /// </summary>
-        internal void UpdateVisibility()
+        private void updateVisibility()
         {
             int count = selectedBlueprints.Count;
 
             selectionDetailsText.Text = count > 0 ? count.ToString() : string.Empty;
 
-            if (count > 0)
-            {
-                Show();
-                OnSelectionChanged();
-            }
-            else
-                Hide();
+            this.FadeTo(count > 0 ? 1 : 0);
+            OnSelectionChanged();
         }
 
         /// <summary>
-        /// Triggered whenever more than one object is selected, on each change.
+        /// Triggered whenever the set of selected objects changes.
         /// Should update the selection box's state to match supported operations.
         /// </summary>
         protected virtual void OnSelectionChanged()
@@ -310,18 +345,14 @@ namespace osu.Game.Screens.Edit.Compose.Components
         /// <param name="sampleName">The name of the hit sample.</param>
         public void AddHitSample(string sampleName)
         {
-            EditorBeatmap.BeginChange();
-
-            foreach (var h in EditorBeatmap.SelectedHitObjects)
+            EditorBeatmap.PerformOnSelection(h =>
             {
                 // Make sure there isn't already an existing sample
                 if (h.Samples.Any(s => s.Name == sampleName))
-                    continue;
+                    return;
 
-                h.Samples.Add(new HitSampleInfo { Name = sampleName });
-            }
-
-            EditorBeatmap.EndChange();
+                h.Samples.Add(new HitSampleInfo(sampleName));
+            });
         }
 
         /// <summary>
@@ -331,19 +362,15 @@ namespace osu.Game.Screens.Edit.Compose.Components
         /// <exception cref="InvalidOperationException">Throws if any selected object doesn't implement <see cref="IHasComboInformation"/></exception>
         public void SetNewCombo(bool state)
         {
-            EditorBeatmap.BeginChange();
-
-            foreach (var h in EditorBeatmap.SelectedHitObjects)
+            EditorBeatmap.PerformOnSelection(h =>
             {
                 var comboInfo = h as IHasComboInformation;
 
-                if (comboInfo == null || comboInfo.NewCombo == state) continue;
+                if (comboInfo == null || comboInfo.NewCombo == state) return;
 
                 comboInfo.NewCombo = state;
                 EditorBeatmap.Update(h);
-            }
-
-            EditorBeatmap.EndChange();
+            });
         }
 
         /// <summary>
@@ -352,12 +379,7 @@ namespace osu.Game.Screens.Edit.Compose.Components
         /// <param name="sampleName">The name of the hit sample.</param>
         public void RemoveHitSample(string sampleName)
         {
-            EditorBeatmap.BeginChange();
-
-            foreach (var h in EditorBeatmap.SelectedHitObjects)
-                h.SamplesBindable.RemoveAll(s => s.Name == sampleName);
-
-            EditorBeatmap.EndChange();
+            EditorBeatmap.PerformOnSelection(h => h.SamplesBindable.RemoveAll(s => s.Name == sampleName));
         }
 
         #endregion
@@ -419,8 +441,12 @@ namespace osu.Game.Screens.Edit.Compose.Components
             };
 
             // bring in updates from selection changes
-            EditorBeatmap.HitObjectUpdated += _ => UpdateTernaryStates();
-            EditorBeatmap.SelectedHitObjects.CollectionChanged += (sender, args) => UpdateTernaryStates();
+            EditorBeatmap.HitObjectUpdated += _ => Scheduler.AddOnce(UpdateTernaryStates);
+            EditorBeatmap.SelectedHitObjects.CollectionChanged += (sender, args) =>
+            {
+                Scheduler.AddOnce(updateVisibility);
+                Scheduler.AddOnce(UpdateTernaryStates);
+            };
         }
 
         /// <summary>

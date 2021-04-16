@@ -136,7 +136,7 @@ namespace osu.Game.Beatmaps
         public List<ScoreInfo> Scores { get; set; }
 
         [JsonIgnore]
-        public DifficultyRating DifficultyRating => BeatmapDifficultyManager.GetDifficultyRating(StarDifficulty);
+        public DifficultyRating DifficultyRating => BeatmapDifficultyCache.GetDifficultyRating(StarDifficulty);
 
         public string[] SearchableTerms => new[]
         {
@@ -147,7 +147,7 @@ namespace osu.Game.Beatmaps
         {
             string version = string.IsNullOrEmpty(Version) ? string.Empty : $"[{Version}]";
 
-            return $"{Metadata} {version}".Trim();
+            return $"{Metadata ?? BeatmapSet?.Metadata} {version}".Trim();
         }
 
         public bool Equals(BeatmapInfo other)

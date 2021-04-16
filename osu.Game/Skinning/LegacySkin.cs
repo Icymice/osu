@@ -7,7 +7,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using JetBrains.Annotations;
-using osu.Framework.Audio;
 using osu.Framework.Audio.Sample;
 using osu.Framework.Bindables;
 using osu.Framework.Graphics;
@@ -19,7 +18,6 @@ using osu.Game.Beatmaps.Formats;
 using osu.Game.IO;
 using osu.Game.Rulesets.Scoring;
 using osu.Game.Screens.Play.HUD;
-using osuTK;
 using osuTK.Graphics;
 
 namespace osu.Game.Skinning
@@ -30,7 +28,7 @@ namespace osu.Game.Skinning
         protected TextureStore Textures;
 
         [CanBeNull]
-        protected IResourceStore<SampleChannel> Samples;
+        protected ISampleStore Samples;
 
         /// <summary>
         /// Whether texture for the keys exists.
@@ -54,12 +52,12 @@ namespace osu.Game.Skinning
 
         private readonly Dictionary<int, LegacyManiaSkinConfiguration> maniaConfigurations = new Dictionary<int, LegacyManiaSkinConfiguration>();
 
-        public LegacySkin(SkinInfo skin, IResourceStore<byte[]> storage, AudioManager audioManager)
-            : this(skin, new LegacySkinResourceStore<SkinFileInfo>(skin, storage), audioManager, "skin.ini")
+        public LegacySkin(SkinInfo skin, IStorageResourceProvider resources)
+            : this(skin, new LegacySkinResourceStore<SkinFileInfo>(skin, resources.Files), resources, "skin.ini")
         {
         }
 
-        protected LegacySkin(SkinInfo skin, IResourceStore<byte[]> storage, AudioManager audioManager, string filename)
+        protected LegacySkin(SkinInfo skin, [CanBeNull] IResourceStore<byte[]> storage, [CanBeNull] IStorageResourceProvider resources, string filename)
             : base(skin)
         {
             using (var stream = storage?.GetStream(filename))
@@ -85,12 +83,12 @@ namespace osu.Game.Skinning
 
             if (storage != null)
             {
-                var samples = audioManager?.GetSampleStore(storage);
+                var samples = resources?.AudioManager?.GetSampleStore(storage);
                 if (samples != null)
                     samples.PlaybackConcurrency = OsuGameBase.SAMPLE_CONCURRENCY;
 
                 Samples = samples;
-                Textures = new TextureStore(new TextureLoaderStore(storage));
+                Textures = new TextureStore(resources?.CreateTextureLoaderStore(storage));
 
                 (storage as ResourceStore<byte[]>)?.AddExtension("ogg");
             }
@@ -99,13 +97,6 @@ namespace osu.Game.Skinning
             hasKeyTexture = new Lazy<bool>(() => this.GetAnimation(
                 lookupForMania<string>(new LegacyManiaSkinConfigurationLookup(4, LegacyManiaSkinConfigurationLookups.KeyImage, 0))?.Value ?? "mania-key1", true,
                 true) != null);
-        }
-
-        protected override void Dispose(bool isDisposing)
-        {
-            base.Dispose(isDisposing);
-            Textures?.Dispose();
-            Samples?.Dispose();
         }
 
         public override IBindable<TValue> GetConfig<TLookup, TValue>(TLookup lookup)
@@ -168,6 +159,9 @@ namespace osu.Game.Skinning
 
                 case LegacyManiaSkinConfigurationLookups.HitPosition:
                     return SkinUtils.As<TValue>(new Bindable<float>(existing.HitPosition));
+
+                case LegacyManiaSkinConfigurationLookups.ScorePosition:
+                    return SkinUtils.As<TValue>(new Bindable<float>(existing.ScorePosition));
 
                 case LegacyManiaSkinConfigurationLookups.LightPosition:
                     return SkinUtils.As<TValue>(new Bindable<float>(existing.LightPosition));
@@ -325,19 +319,13 @@ namespace osu.Game.Skinning
             return null;
         }
 
-        private string scorePrefix => GetConfig<LegacySkinConfiguration.LegacySetting, string>(LegacySkinConfiguration.LegacySetting.ScorePrefix)?.Value ?? "score";
-
-        private string comboPrefix => GetConfig<LegacySkinConfiguration.LegacySetting, string>(LegacySkinConfiguration.LegacySetting.ComboPrefix)?.Value ?? "score";
-
-        private bool hasScoreFont => this.HasFont(scorePrefix);
-
         public override Drawable GetDrawableComponent(ISkinComponent component)
         {
             switch (component)
             {
                 case HUDSkinComponent hudComponent:
                 {
-                    if (!hasScoreFont)
+                    if (!this.HasFont(LegacyFont.Score))
                         return null;
 
                     switch (hudComponent.Component)
@@ -353,43 +341,66 @@ namespace osu.Game.Skinning
 
                         case HUDSkinComponents.HealthDisplay:
                             return new LegacyHealthDisplay(this);
-
-                        case HUDSkinComponents.ComboText:
-                            return new LegacySpriteText(this, comboPrefix)
-                            {
-                                Spacing = new Vector2(-(GetConfig<LegacySkinConfiguration.LegacySetting, int>(LegacySkinConfiguration.LegacySetting.ComboOverlap)?.Value ?? -2), 0)
-                            };
-
-                        case HUDSkinComponents.ScoreText:
-                            return new LegacySpriteText(this, scorePrefix)
-                            {
-                                Spacing = new Vector2(-(GetConfig<LegacySkinConfiguration.LegacySetting, int>(LegacySkinConfiguration.LegacySetting.ScoreOverlap)?.Value ?? -2), 0)
-                            };
                     }
 
                     return null;
                 }
 
                 case GameplaySkinComponent<HitResult> resultComponent:
-                    switch (resultComponent.Component)
+                    Func<Drawable> createDrawable = () => getJudgementAnimation(resultComponent.Component);
+
+                    // kind of wasteful that we throw this away, but should do for now.
+                    if (createDrawable() != null)
                     {
-                        case HitResult.Miss:
-                            return this.GetAnimation("hit0", true, false);
+                        var particle = getParticleTexture(resultComponent.Component);
 
-                        case HitResult.Meh:
-                            return this.GetAnimation("hit50", true, false);
-
-                        case HitResult.Ok:
-                            return this.GetAnimation("hit100", true, false);
-
-                        case HitResult.Great:
-                            return this.GetAnimation("hit300", true, false);
+                        if (particle != null)
+                            return new LegacyJudgementPieceNew(resultComponent.Component, createDrawable, particle);
+                        else
+                            return new LegacyJudgementPieceOld(resultComponent.Component, createDrawable);
                     }
 
                     break;
             }
 
             return this.GetAnimation(component.LookupName, false, false);
+        }
+
+        private Texture getParticleTexture(HitResult result)
+        {
+            switch (result)
+            {
+                case HitResult.Meh:
+                    return GetTexture("particle50");
+
+                case HitResult.Ok:
+                    return GetTexture("particle100");
+
+                case HitResult.Great:
+                    return GetTexture("particle300");
+            }
+
+            return null;
+        }
+
+        private Drawable getJudgementAnimation(HitResult result)
+        {
+            switch (result)
+            {
+                case HitResult.Miss:
+                    return this.GetAnimation("hit0", true, false);
+
+                case HitResult.Meh:
+                    return this.GetAnimation("hit50", true, false);
+
+                case HitResult.Ok:
+                    return this.GetAnimation("hit100", true, false);
+
+                case HitResult.Great:
+                    return this.GetAnimation("hit300", true, false);
+            }
+
+            return null;
         }
 
         public override Texture GetTexture(string componentName, WrapMode wrapModeS, WrapMode wrapModeT)
@@ -415,12 +426,16 @@ namespace osu.Game.Skinning
             return null;
         }
 
-        public override SampleChannel GetSample(ISampleInfo sampleInfo)
+        public override ISample GetSample(ISampleInfo sampleInfo)
         {
-            var lookupNames = sampleInfo.LookupNames;
+            IEnumerable<string> lookupNames;
 
             if (sampleInfo is HitSampleInfo hitSample)
                 lookupNames = getLegacyLookupNames(hitSample);
+            else
+            {
+                lookupNames = sampleInfo.LookupNames.SelectMany(getFallbackNames);
+            }
 
             foreach (var lookup in lookupNames)
             {
@@ -433,6 +448,27 @@ namespace osu.Game.Skinning
             return null;
         }
 
+        private IEnumerable<string> getLegacyLookupNames(HitSampleInfo hitSample)
+        {
+            var lookupNames = hitSample.LookupNames.SelectMany(getFallbackNames);
+
+            if (!UseCustomSampleBanks && !string.IsNullOrEmpty(hitSample.Suffix))
+            {
+                // for compatibility with stable, exclude the lookup names with the custom sample bank suffix, if they are not valid for use in this skin.
+                // using .EndsWith() is intentional as it ensures parity in all edge cases
+                // (see LegacyTaikoSampleInfo for an example of one - prioritising the taiko prefix should still apply, but the sample bank should not).
+                lookupNames = lookupNames.Where(name => !name.EndsWith(hitSample.Suffix, StringComparison.Ordinal));
+            }
+
+            foreach (var l in lookupNames)
+                yield return l;
+
+            // also for compatibility, try falling back to non-bank samples (so-called "universal" samples) as the last resort.
+            // going forward specifying banks shall always be required, even for elements that wouldn't require it on stable,
+            // which is why this is done locally here.
+            yield return hitSample.Name;
+        }
+
         private IEnumerable<string> getFallbackNames(string componentName)
         {
             // May be something like "Gameplay/osu/approachcircle" from lazer, or "Arrows/note1" from a user skin.
@@ -443,22 +479,11 @@ namespace osu.Game.Skinning
             yield return componentName.StartsWith("Gameplay/taiko/", StringComparison.Ordinal) ? "taiko-" + lastPiece : lastPiece;
         }
 
-        private IEnumerable<string> getLegacyLookupNames(HitSampleInfo hitSample)
+        protected override void Dispose(bool isDisposing)
         {
-            var lookupNames = hitSample.LookupNames;
-
-            if (!UseCustomSampleBanks && !string.IsNullOrEmpty(hitSample.Suffix))
-                // for compatibility with stable, exclude the lookup names with the custom sample bank suffix, if they are not valid for use in this skin.
-                // using .EndsWith() is intentional as it ensures parity in all edge cases
-                // (see LegacyTaikoSampleInfo for an example of one - prioritising the taiko prefix should still apply, but the sample bank should not).
-                lookupNames = hitSample.LookupNames.Where(name => !name.EndsWith(hitSample.Suffix, StringComparison.Ordinal));
-
-            // also for compatibility, try falling back to non-bank samples (so-called "universal" samples) as the last resort.
-            // going forward specifying banks shall always be required, even for elements that wouldn't require it on stable,
-            // which is why this is done locally here.
-            lookupNames = lookupNames.Append(hitSample.Name);
-
-            return lookupNames;
+            base.Dispose(isDisposing);
+            Textures?.Dispose();
+            Samples?.Dispose();
         }
     }
 }
